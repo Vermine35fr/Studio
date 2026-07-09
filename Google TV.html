@@ -371,9 +371,9 @@
                 <div class="source-group">
                     <label>🖥️ Résolution</label>
                     <select id="resSelect">
-                        <option value="3840x2160">4K — 3840 × 2160</option>
+                        <option value="3840x2160" selected>4K — 3840 × 2160</option>
                         <option value="2560x1440">1440p — 2560 × 1440</option>
-                        <option value="1920x1080" selected>1080p — 1920 × 1080</option>
+                        <option value="1920x1080">1080p — 1920 × 1080</option>
                         <option value="1280x720">720p — 1280 × 720</option>
                     </select>
                 </div>
@@ -502,9 +502,10 @@
                 const constraints = {
                     video: {
                         deviceId: { exact: vId },
-                        width: { ideal: resW },
-                        height: { ideal: resH },
-                        frameRate: { ideal: 60 }
+                        width: { exact: resW },
+                        height: { exact: resH },
+                        frameRate: { min: 55, ideal: 60, max: 60 },
+                        resizeMode: { exact: 'none' }
                     },
                     audio: {
                         deviceId: { exact: aId },
@@ -514,7 +515,21 @@
                     }
                 };
 
-                currentStream = await navigator.mediaDevices.getUserMedia(constraints);
+                try {
+                    currentStream = await navigator.mediaDevices.getUserMedia(constraints);
+                } catch (strictErr) {
+                    console.warn('Contraintes strictes refusées, fallback en mode "ideal" :', strictErr);
+                    const fallbackConstraints = {
+                        video: {
+                            deviceId: { exact: vId },
+                            width: { ideal: resW },
+                            height: { ideal: resH },
+                            frameRate: { ideal: 60 }
+                        },
+                        audio: constraints.audio
+                    };
+                    currentStream = await navigator.mediaDevices.getUserMedia(fallbackConstraints);
+                }
                 video.srcObject = currentStream;
                 video.volume = volumeSlider.value / 100;
 
