@@ -130,6 +130,25 @@
             color: white;
         }
 
+        .source-fixed {
+            width: 100%;
+            background: rgba(255,255,255,0.06);
+            border: 1px solid rgba(255,255,255,0.12);
+            color: rgba(255,255,255,0.85);
+            padding: 10px 14px;
+            border-radius: 10px;
+            font-size: 14px;
+            box-sizing: border-box;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .source-fixed .lock-icon {
+            font-size: 12px;
+            opacity: 0.4;
+        }
+
         .modal-footer {
             display: flex;
             justify-content: flex-end;
@@ -365,7 +384,8 @@
 
                 <div class="source-group">
                     <label>📷 Caméra</label>
-                    <select id="videoSelect"></select>
+                    <div class="source-fixed" id="videoFixedLabel">Détection…</div>
+                    <select id="videoSelect" style="display:none;"></select>
                 </div>
 
                 <div class="source-group">
@@ -380,7 +400,8 @@
 
                 <div class="source-group">
                     <label>🎙️ Source audio</label>
-                    <select id="audioSelect"></select>
+                    <div class="source-fixed" id="audioFixedLabel">Détection…</div>
+                    <select id="audioSelect" style="display:none;"></select>
                 </div>
 
                 <div class="modal-footer">
@@ -454,6 +475,8 @@
         const modalBackdrop = document.getElementById('modalBackdrop');
         const videoSelect   = document.getElementById('videoSelect');
         const audioSelect   = document.getElementById('audioSelect');
+        const videoFixedLabel = document.getElementById('videoFixedLabel');
+        const audioFixedLabel = document.getElementById('audioFixedLabel');
         const launchBtn     = document.getElementById('launchBtn');
         const volumeSlider  = document.getElementById('volumeSlider');
         const volumeValue   = document.getElementById('volumeValue');
@@ -482,6 +505,28 @@
                 audioSelect.innerHTML = audioDevices.map((d, i) =>
                     `<option value="${d.deviceId}">${d.label || 'Micro ' + (i + 1)}</option>`
                 ).join('');
+
+                // Verrouillage sur les périphériques Elgato (caméra + audio HDMI)
+                const elgatoVideo = videoDevices.find(d => /elgato/i.test(d.label));
+                const elgatoAudio = audioDevices.find(d => /elgato/i.test(d.label));
+
+                if (elgatoVideo) {
+                    videoSelect.value = elgatoVideo.deviceId;
+                    videoFixedLabel.innerHTML = `<span class="lock-icon">🔒</span> ${elgatoVideo.label}`;
+                } else if (videoDevices.length) {
+                    videoFixedLabel.innerHTML = `<span class="lock-icon">⚠️</span> Elgato introuvable — ${videoDevices[0].label}`;
+                } else {
+                    videoFixedLabel.textContent = 'Aucune caméra détectée';
+                }
+
+                if (elgatoAudio) {
+                    audioSelect.value = elgatoAudio.deviceId;
+                    audioFixedLabel.innerHTML = `<span class="lock-icon">🔒</span> ${elgatoAudio.label}`;
+                } else if (audioDevices.length) {
+                    audioFixedLabel.innerHTML = `<span class="lock-icon">⚠️</span> Elgato introuvable — ${audioDevices[0].label}`;
+                } else {
+                    audioFixedLabel.textContent = 'Aucune source audio détectée';
+                }
 
             } catch (err) {
                 console.error(err);
