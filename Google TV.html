@@ -35,16 +35,14 @@
             justify-content: center; 
         }
 
+        /* Filtre allégé : le drop-shadow (coûteux en GPU en 1440p/4K 60 fps) a été retiré.
+           Pour une image 100 % fidèle, remplace la ligne par : filter: none; */
         video { 
             width: 100%; 
             height: 100%; 
             object-fit: contain;
             image-rendering: auto;
-            filter: 
-                brightness(1.02) 
-                contrast(1.1) 
-                saturate(1.05)
-                drop-shadow(0 0 0.5px rgba(255,255,255,0.1));
+            filter: brightness(1.02) contrast(1.1) saturate(1.05);
         }
 
         /* --- Modal de sélection de source --- */
@@ -300,7 +298,7 @@
             border-radius: 20px; 
             border: 1px solid rgba(0,255,136,0.25); 
             white-space: nowrap;
-            max-width: 200px;
+            max-width: 300px;
             overflow: hidden;
             text-overflow: ellipsis;
             flex-shrink: 0;
@@ -310,6 +308,12 @@
             color: var(--danger);
             background: rgba(255,82,82,0.1);
             border-color: rgba(255,82,82,0.3);
+        }
+
+        .status-pill.warning {
+            color: #ffc800;
+            background: rgba(255,200,0,0.08);
+            border-color: rgba(255,200,0,0.3);
         }
 
         /* --- Panneau infos flux --- */
@@ -323,7 +327,7 @@
             border-radius: 14px;
             padding: 16px 20px;
             z-index: 20;
-            min-width: 220px;
+            min-width: 240px;
             opacity: 0;
             visibility: hidden;
             transform: translateY(-6px);
@@ -370,6 +374,7 @@
         }
 
         .info-value.highlight { color: var(--success); }
+        .info-value.bad { color: var(--danger); }
     </style>
 </head>
 <body>
@@ -416,28 +421,28 @@
         <div class="info-panel" id="infoPanel">
             <div class="info-panel-title">Infos flux</div>
             <div class="info-row">
-                <span class="info-label">Résolution</span>
+                <span class="info-label">Résolution obtenue</span>
                 <span class="info-value highlight" id="iRes">—</span>
             </div>
             <div class="info-row">
-                <span class="info-label">Fréquence</span>
+                <span class="info-label">Fréquence capture</span>
                 <span class="info-value highlight" id="iFps">—</span>
             </div>
             <div class="info-row">
-                <span class="info-label">Débit vidéo</span>
+                <span class="info-label">FPS affichés</span>
+                <span class="info-value highlight" id="iDisplayFps">—</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Images perdues</span>
+                <span class="info-value" id="iDropped">—</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Débit brut (théor.)</span>
                 <span class="info-value" id="iBitrate">—</span>
             </div>
             <div class="info-row">
-                <span class="info-label">Codec vidéo</span>
-                <span class="info-value" id="iCodec">—</span>
-            </div>
-            <div class="info-row">
-                <span class="info-label">Codec audio</span>
-                <span class="info-value" id="iACodec">—</span>
-            </div>
-            <div class="info-row">
-                <span class="info-label">Latence</span>
-                <span class="info-value" id="iLatency">—</span>
+                <span class="info-label">Audio</span>
+                <span class="info-value" id="iAudio">—</span>
             </div>
         </div>
         
@@ -456,7 +461,7 @@
             <div class="sep"></div>
 
             <div class="btn-group">
-                <button id="muteBtn" onclick="toggleMute()">🎙️ MICRO</button>
+                <button id="muteBtn" onclick="toggleMute()">🔊 SON</button>
                 <button id="infoBtn" onclick="toggleInfo()">📊 INFOS</button>
                 <button id="fsBtn" onclick="toggleFullscreen()">📺 PLEIN ÉCRAN</button>
                 <button class="btn-stop" onclick="stopEverything()">⏹ ÉTEINDRE</button>
@@ -484,16 +489,50 @@
         let currentStream   = null;
         let overlayTimeout  = null;
         let infoPollInterval = null;
-        let lastBytes       = 0;
-        let lastBytesTime   = 0;
         let isLive          = false;
+        let permissionGranted = false;
 
-        // --- Initialisation : permission puis peuple les selects ---
+        // Audio (AudioContext à faible latence)
+        let audioCtx        = null;
+        let gainNode        = null;
+
+        // Mesure des FPS réellement affichés
+        let frameCount      = 0;
+        let lastFpsTime     = 0;
+        let displayedFps    = null;
+        let rvfcId          = null;
+
+        // --- Messages d'erreur détaillés ---
+        function describeError(err) {
+            switch (err && err.name) {
+                case 'NotAllowedError':
+                    return "Permission refusée : autorisez l'accès à la caméra et au micro dans le navigateur.";
+                case 'NotReadableError':
+                    return "Impossible de lire la source : la capture est probablement utilisée par une autre application.";
+                case 'OverconstrainedError':
+                    return "Résolution ou fréquence non supportée par cette source" +
+                           (err.constraint ? ` (contrainte : ${err.constraint}).` : '.');
+                case 'NotFoundError':
+                    return "Périphérique introuvable : vérifiez la connexion de la capture.";
+                default:
+                    return `Erreur de source (${(err && err.name) || 'inconnue'}) : ${(err && err.message) || ''}`;
+            }
+        }
+
+        // --- Initialisation : permission (une seule fois) puis peuple les selects ---
         async function initModal() {
             try {
-                const initStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-                const devices = await navigator.mediaDevices.enumerateDevices();
-                initStream.getTracks().forEach(t => t.stop());
+                let devices = await navigator.mediaDevices.enumerateDevices();
+
+                // Les labels ne sont disponibles qu'après une permission accordée.
+                // On n'ouvre les périphériques que si c'est nécessaire (1re fois ou labels vides).
+                const labelsAvailable = devices.some(d => d.label);
+                if (!permissionGranted || !labelsAvailable) {
+                    const initStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+                    initStream.getTracks().forEach(t => t.stop());
+                    permissionGranted = true;
+                    devices = await navigator.mediaDevices.enumerateDevices();
+                }
 
                 const videoDevices = devices.filter(d => d.kind === 'videoinput');
                 const audioDevices = devices.filter(d => d.kind === 'audioinput');
@@ -530,11 +569,75 @@
 
             } catch (err) {
                 console.error(err);
-                alert("Permission refusée : impossible d'accéder aux périphériques.");
+                alert(describeError(err));
             }
         }
 
         initModal();
+
+        // --- Audio via AudioContext (latence réduite) ---
+        function setupAudio(stream) {
+            teardownAudio();
+            const aTrack = stream.getAudioTracks()[0];
+            if (!aTrack) return;
+
+            audioCtx = new AudioContext({ latencyHint: 'interactive' });
+            const source = audioCtx.createMediaStreamSource(new MediaStream([aTrack]));
+            gainNode = audioCtx.createGain();
+            gainNode.gain.value = volumeSlider.value / 100;
+            source.connect(gainNode).connect(audioCtx.destination);
+            audioCtx.resume();
+
+            // Le son passe par l'AudioContext : on coupe celui de l'élément <video>
+            video.muted = true;
+        }
+
+        function teardownAudio() {
+            if (audioCtx) {
+                audioCtx.close().catch(() => {});
+                audioCtx = null;
+            }
+            gainNode = null;
+            video.muted = false;
+        }
+
+        function setVolume(percent) {
+            if (gainNode) gainNode.gain.value = percent / 100;
+            else video.volume = percent / 100;
+            volumeSlider.value = percent;
+            volumeValue.innerText = percent + '%';
+        }
+
+        // --- FPS réellement affichés (requestVideoFrameCallback) ---
+        function onVideoFrame(now) {
+            frameCount++;
+            if (!lastFpsTime) lastFpsTime = now;
+            const dt = now - lastFpsTime;
+            if (dt >= 1000) {
+                displayedFps = frameCount * 1000 / dt;
+                frameCount = 0;
+                lastFpsTime = now;
+            }
+            rvfcId = video.requestVideoFrameCallback(onVideoFrame);
+        }
+
+        function startFpsMeasure() {
+            stopFpsMeasure();
+            frameCount = 0;
+            lastFpsTime = 0;
+            displayedFps = null;
+            if ('requestVideoFrameCallback' in video) {
+                rvfcId = video.requestVideoFrameCallback(onVideoFrame);
+            }
+        }
+
+        function stopFpsMeasure() {
+            if (rvfcId !== null && 'cancelVideoFrameCallback' in video) {
+                video.cancelVideoFrameCallback(rvfcId);
+            }
+            rvfcId = null;
+            displayedFps = null;
+        }
 
         // --- Lancement ---
         launchBtn.addEventListener('click', async () => {
@@ -576,33 +679,55 @@
                     currentStream = await navigator.mediaDevices.getUserMedia(fallbackConstraints);
                 }
                 video.srcObject = currentStream;
-                video.volume = volumeSlider.value / 100;
 
                 currentStream.getVideoTracks()[0].addEventListener('ended', handleSourceDisconnected);
+
+                // Audio via AudioContext + volume
+                setupAudio(currentStream);
+                setVolume(parseInt(volumeSlider.value, 10));
 
                 modalBackdrop.classList.add('hidden');
                 isLive = true;
 
-                // Reset micro
+                // Reset son
                 const audioTrack = currentStream.getAudioTracks()[0];
                 if (audioTrack) audioTrack.enabled = true;
-                muteBtn.innerHTML = '🎙️ MICRO';
+                muteBtn.innerHTML = '🔊 SON';
                 muteBtn.classList.remove('active-mute');
 
-                // Label status
-                const shortLabel = vLabel.length > 22 ? vLabel.substring(0, 20) + '…' : vLabel;
-                const resLabel = resSelect.options[resSelect.selectedIndex].text.split('—')[0].trim();
-                statusDisplay.classList.remove('disconnected');
-                statusDisplay.innerText = shortLabel.toUpperCase() + ' · ' + resLabel;
+                // Label status : résolution RÉELLEMENT obtenue
+                refreshStatus(vLabel, resW, resH);
 
-                // Démarre le polling des stats
+                // Mesures
+                startFpsMeasure();
                 startInfoPolling();
 
             } catch (err) {
                 console.error(err);
-                alert("Erreur de source : vérifiez que la caméra n'est pas utilisée par une autre application.");
+                alert(describeError(err));
             }
         });
+
+        // --- Statut basé sur les réglages réels du flux ---
+        function refreshStatus(vLabel, wantedW, wantedH) {
+            const settings = currentStream.getVideoTracks()[0].getSettings();
+            const shortLabel = vLabel.length > 22 ? vLabel.substring(0, 20) + '…' : vLabel;
+
+            const gotW = settings.width;
+            const gotH = settings.height;
+            const gotFps = settings.frameRate ? Math.round(settings.frameRate) : null;
+
+            const resText = gotH ? `${gotH}p` : '?';
+            const fpsText = gotFps ? ` · ${gotFps} fps` : '';
+            const mismatch = gotW && gotH && (gotW !== wantedW || gotH !== wantedH);
+
+            statusDisplay.classList.remove('disconnected');
+            statusDisplay.classList.toggle('warning', !!mismatch);
+            statusDisplay.innerText = shortLabel.toUpperCase() + ' · ' + resText + fpsText + (mismatch ? ' ⚠' : '');
+            statusDisplay.title = mismatch
+                ? `Résolution demandée ${wantedW}×${wantedH}, obtenue ${gotW}×${gotH} (mode de repli)`
+                : (gotW ? `${gotW}×${gotH}${gotFps ? ' @ ' + gotFps + ' fps' : ''}` : '');
+        }
 
         // --- Overlay : affichage sur mouvement souris, masquage après 2s d'inactivité ---
         const player = document.getElementById('mainPlayer');
@@ -635,56 +760,61 @@
             if (visible) updateInfoPanel();
         }
 
-        async function updateInfoPanel() {
+        function updateInfoPanel() {
             if (!currentStream) return;
 
             const vTrack = currentStream.getVideoTracks()[0];
             const aTrack = currentStream.getAudioTracks()[0];
-
-            // Résolution et FPS réels depuis les settings du track
             const settings = vTrack.getSettings();
+
+            // Résolution et fréquence de capture (réglages réels du track)
             document.getElementById('iRes').innerText =
                 settings.width && settings.height ? `${settings.width} × ${settings.height}` : '—';
             document.getElementById('iFps').innerText =
                 settings.frameRate ? `${settings.frameRate.toFixed(1)} fps` : '—';
 
-            // Codec vidéo
-            document.getElementById('iCodec').innerText = vTrack.label
-                ? vTrack.label.includes('H264') || vTrack.label.includes('h264') ? 'H.264' : 'RAW / YUY2'
-                : '—';
+            // FPS réellement rendus à l'écran
+            document.getElementById('iDisplayFps').innerText =
+                displayedFps !== null ? `${displayedFps.toFixed(1)} fps` : '—';
 
-            // Codec audio
-            document.getElementById('iACodec').innerText = aTrack ? 'PCM' : '—';
+            // Images perdues
+            const droppedEl = document.getElementById('iDropped');
+            if (typeof video.getVideoPlaybackQuality === 'function') {
+                const q = video.getVideoPlaybackQuality();
+                if (q.totalVideoFrames > 0) {
+                    droppedEl.innerText = `${q.droppedVideoFrames} / ${q.totalVideoFrames}`;
+                    droppedEl.classList.toggle('bad', q.droppedVideoFrames > 0);
+                } else {
+                    droppedEl.innerText = '—';
+                    droppedEl.classList.remove('bad');
+                }
+            } else {
+                droppedEl.innerText = '—';
+            }
 
-            // Latence (via HTMLVideoElement)
-            const latency = video.mozParsedFrames !== undefined
-                ? null // Firefox n'expose pas directement la latence
-                : null;
-            document.getElementById('iLatency').innerText = latency !== null ? `${latency} ms` : '< 100 ms';
-
-            // Débit via getStats() sur un RTCPeerConnection local si dispo, sinon estimation
-            estimateBitrate(vTrack);
-        }
-
-        async function estimateBitrate(track) {
-            // Firefox expose mozGetStats ou getStats sur MediaStreamTrack
-            // On utilise requestVideoFrameCallback si disponible, sinon on compare
-            // les frames rendues dans le temps pour estimer le débit approximatif.
-            // L'approche la plus compatible : lire les stats du track via RTCPeerConnection loopback.
-            // Pour un flux local (webcam), le "bitrate" est celui capturé, pas encodé.
-            // On affiche la résolution × fps × bitdepth comme estimation théorique.
-            const settings = track.getSettings();
+            // Débit brut théorique (flux local non compressé, 16 bpp)
             if (settings.width && settings.height && settings.frameRate) {
-                // YUY2 non compressé : w × h × fps × 16bpp / 1e6 = Mbps
                 const theoretical = (settings.width * settings.height * settings.frameRate * 16) / 1e6;
-                document.getElementById('iBitrate').innerText = `~${theoretical.toFixed(0)} Mbps (RAW)`;
+                document.getElementById('iBitrate').innerText = `~${theoretical.toFixed(0)} Mbps`;
             } else {
                 document.getElementById('iBitrate').innerText = '—';
             }
+
+            // Audio (réglages réels du track, si exposés par le navigateur)
+            let audioText = '—';
+            if (aTrack) {
+                const s = aTrack.getSettings();
+                const parts = [];
+                if (s.sampleRate) parts.push(`${(s.sampleRate / 1000).toFixed(1)} kHz`);
+                if (s.channelCount) parts.push(`${s.channelCount} ch`);
+                audioText = parts.length ? parts.join(' · ') : 'actif';
+            }
+            document.getElementById('iAudio').innerText = audioText;
         }
 
         function startInfoPolling() {
             // Rafraîchit le panneau toutes les secondes s'il est ouvert
+            stopInfoPolling();
             infoPollInterval = setInterval(() => {
                 if (infoPanel.classList.contains('visible')) updateInfoPanel();
             }, 1000);
@@ -698,6 +828,8 @@
         // --- Déconnexion de source ---
         function handleSourceDisconnected() {
             stopInfoPolling();
+            stopFpsMeasure();
+            teardownAudio();
             if (currentStream) {
                 currentStream.getTracks().forEach(t => t.stop());
                 video.srcObject = null;
@@ -709,7 +841,9 @@
             infoBtn.classList.remove('active-info');
             if (document.fullscreenElement) document.exitFullscreen();
 
+            statusDisplay.classList.remove('warning');
             statusDisplay.classList.add('disconnected');
+            statusDisplay.title = '';
             statusDisplay.innerText = "SOURCE DÉCONNECTÉE";
             overlay.classList.remove('hidden');
             overlay.classList.add('visible');
@@ -722,13 +856,13 @@
             }, 2500);
         }
 
-        // --- Mute ---
+        // --- Son (coupe le son de la capture) ---
         function toggleMute() {
             if (!currentStream) return;
             const track = currentStream.getAudioTracks()[0];
             if (track) {
                 track.enabled = !track.enabled;
-                muteBtn.innerHTML = track.enabled ? "🎙️ MICRO" : "🔇 MICRO";
+                muteBtn.innerHTML = track.enabled ? "🔊 SON" : "🔇 SON";
                 muteBtn.classList.toggle('active-mute', !track.enabled);
             }
         }
@@ -736,6 +870,8 @@
         // --- Éteindre ---
         function stopEverything() {
             stopInfoPolling();
+            stopFpsMeasure();
+            teardownAudio();
             if (currentStream) {
                 currentStream.getTracks().forEach(t => t.stop());
                 video.srcObject = null;
@@ -746,8 +882,9 @@
             overlay.classList.add('hidden');
             infoPanel.classList.remove('visible');
             infoBtn.classList.remove('active-info');
-            muteBtn.innerHTML = '🎙️ MICRO';
+            muteBtn.innerHTML = '🔊 SON';
             muteBtn.classList.remove('active-mute');
+            statusDisplay.classList.remove('warning');
             if (document.fullscreenElement) document.exitFullscreen();
             initModal().then(() => modalBackdrop.classList.remove('hidden'));
         }
@@ -774,17 +911,14 @@
 
         // --- Volume ---
         volumeSlider.addEventListener('input', () => {
-            video.volume = volumeSlider.value / 100;
-            volumeValue.innerText = volumeSlider.value + '%';
+            setVolume(parseInt(volumeSlider.value, 10));
         });
 
         volumeSlider.addEventListener('wheel', (e) => {
             e.preventDefault();
             let current = parseInt(volumeSlider.value, 10);
             current = e.deltaY < 0 ? Math.min(100, current + 5) : Math.max(0, current - 5);
-            volumeSlider.value = current;
-            video.volume = current / 100;
-            volumeValue.innerText = current + '%';
+            setVolume(current);
         }, { passive: false });
 
         // --- Double-clic plein écran ---
